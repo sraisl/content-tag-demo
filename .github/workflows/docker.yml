@@ -1,0 +1,76 @@
+name: Docker content-tag demo
+
+on:
+  push:
+    branches: ["**"]
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/content-tag-demo
+
+jobs:
+  docker:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compute content hash
+        id: content
+        run: |
+          HASH=$(
+            {
+              sha256sum Dockerfile
+              find app -type f -print0 | sort -z | xargs -0 sha256sum
+            } | sha256sum | cut -d' ' -f1
+          )
+
+          echo "hash=$HASH" >> "$GITHUB_OUTPUT"
+          echo "Content hash: $HASH"
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Check whether content image exists
+        id: exists
+        run: |
+          if docker buildx imagetools inspect "$IMAGE_NAME:content-${{ steps.content.outputs.hash }}" > /dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "Image already exists"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "Image does not exist yet"
+          fi
+
+      - name: Set up Docker Buildx
+        if: steps.exists.outputs.exists != 'true'
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push new image
+        if: steps.exists.outputs.exists != 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ env.IMAGE_NAME }}:content-${{ steps.content.outputs.hash }}
+            ${{ env.IMAGE_NAME }}:git-${{ github.sha }}
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+            demo.content-hash=${{ steps.content.outputs.hash }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Retag existing image for this git commit
+        if: steps.exists.outputs.exists == 'true'
+        run: |
+          docker buildx imagetools create \
+            -t "$IMAGE_NAME:git-${{ github.sha }}" \
+            "$IMAGE_NAME:content-${{ steps.content.outputs.hash }}"
